@@ -1,0 +1,38 @@
+# Terraform
+*.tfstate
+*.tfstate.*
+*.tfplan
+.terraform/
+.terraform.lock.hcl
+crash.log
+
+# Terragrunt
+.terragrunt-cache/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Kubernetes
+kubeconfig
+*.kubeconfig
+
+# Helm
+charts/*/charts/
+charts/*/tmpcharts/
+
+# Sensitive
+*.pem
+*.key
+*.env
+secrets.yaml
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

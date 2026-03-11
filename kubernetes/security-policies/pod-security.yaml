@@ -1,0 +1,133 @@
+###############################################################################
+# Pod Security Standards — Restricted Profile
+# Enforces the Kubernetes Pod Security Standards (PSS) restricted level
+# across production namespaces. Prevents privilege escalation, enforces
+# read-only root filesystems, drops all capabilities, and requires
+# non-root execution.
+###############################################################################
+
+# Namespace labels that enforce restricted pod security standards
+# Applied via namespace configuration rather than PodSecurityPolicy (deprecated)
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: production
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: staging
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+---
+###############################################################################
+# ResourceQuota — Restrict resource consumption per namespace
+###############################################################################
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: production-resource-quota
+  namespace: production
+spec:
+  hard:
+    requests.cpu: "20"
+    requests.memory: 40Gi
+    limits.cpu: "40"
+    limits.memory: 80Gi
+    pods: "100"
+    services: "20"
+    persistentvolumeclaims: "30"
+    secrets: "50"
+    configmaps: "50"
+    replicationcontrollers: "0"
+---
+###############################################################################
+# LimitRange — Enforce default resource limits per container
+###############################################################################
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: production-limit-range
+  namespace: production
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: 500m
+        memory: 512Mi
+      defaultRequest:
+        cpu: 100m
+        memory: 128Mi
+      max:
+        cpu: "4"
+        memory: 8Gi
+      min:
+        cpu: 50m
+        memory: 64Mi
+    - type: Pod
+      max:
+        cpu: "8"
+        memory: 16Gi
+    - type: PersistentVolumeClaim
+      max:
+        storage: 100Gi
+      min:
+        storage: 1Gi
+---
+###############################################################################
+# ServiceAccount — Restricted default service account
+# Prevents automatic token mounting and restricts permissions.
+###############################################################################
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: default
+  namespace: production
+automountServiceAccountToken: false
+---
+###############################################################################
+# Role — Minimal permissions for application workloads
+###############################################################################
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: restricted-workload-role
+  namespace: production
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: restricted-workload-binding
+  namespace: production
+subjects:
+  - kind: Group
+    name: system:serviceaccounts:production
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: restricted-workload-role
+  apiGroup: rbac.authorization.k8s.io

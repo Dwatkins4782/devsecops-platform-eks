@@ -1,0 +1,319 @@
+###############################################################################
+# OPA Gatekeeper Constraints
+# Enforces admission policies: require labels, block :latest tag,
+# require resource limits, and additional security controls.
+###############################################################################
+
+# =============================================================================
+# CONSTRAINT: Require Mandatory Labels
+# All deployments must have app, team, and environment labels.
+# =============================================================================
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRequiredLabels
+metadata:
+  name: require-mandatory-labels
+  labels:
+    policy-category: governance
+    severity: high
+spec:
+  enforcementAction: deny
+  match:
+    kinds:
+      - apiGroups: ["apps"]
+        kinds: ["Deployment", "StatefulSet", "DaemonSet"]
+      - apiGroups: ["batch"]
+        kinds: ["Job", "CronJob"]
+    excludedNamespaces:
+      - kube-system
+      - kube-public
+      - gatekeeper-system
+      - argocd
+      - monitoring
+      - security-tools
+      - tigera-operator
+      - amazon-cloudwatch
+  parameters:
+    labels:
+      - "app.kubernetes.io/name"
+      - "app.kubernetes.io/managed-by"
+      - "environment"
+
+# =============================================================================
+# CONSTRAINT: Block Latest Tag
+# Containers must use explicit version tags, not :latest or untagged.
+# =============================================================================
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sBlockLatestImages
+metadata:
+  name: block-latest-image-tag
+  labels:
+    policy-category: supply-chain
+    severity: critical
+spec:
+  enforcementAction: deny
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+      - apiGroups: ["apps"]
+        kinds: ["Deployment", "StatefulSet", "DaemonSet", "ReplicaSet"]
+      - apiGroups: ["batch"]
+        kinds: ["Job", "CronJob"]
+    excludedNamespaces:
+      - kube-system
+      - kube-public
+      - gatekeeper-system
+
+# =============================================================================
+# CONSTRAINT: Require Resource Limits
+# All containers must define CPU and memory requests and limits.
+# =============================================================================
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRequireResourceLimits
+metadata:
+  name: require-resource-limits
+  labels:
+    policy-category: resource-management
+    severity: high
+spec:
+  enforcementAction: deny
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+      - apiGroups: ["apps"]
+        kinds: ["Deployment", "StatefulSet", "DaemonSet"]
+    excludedNamespaces:
+      - kube-system
+      - kube-public
+      - gatekeeper-system
+      - argocd
+
+# =============================================================================
+# CONSTRAINT TEMPLATE + CONSTRAINT: Disallow Privileged Containers
+# =============================================================================
+
+---
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8sdisallowprivileged
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sDisallowPrivileged
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8sdisallowprivileged
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          container.securityContext.privileged == true
+          msg := sprintf("Privileged container '%v' is not allowed.", [container.name])
+        }
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.initContainers[_]
+          container.securityContext.privileged == true
+          msg := sprintf("Privileged init container '%v' is not allowed.", [container.name])
+        }
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sDisallowPrivileged
+metadata:
+  name: disallow-privileged-containers
+  labels:
+    policy-category: security
+    severity: critical
+spec:
+  enforcementAction: deny
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+      - apiGroups: ["apps"]
+        kinds: ["Deployment", "StatefulSet", "DaemonSet"]
+    excludedNamespaces:
+      - kube-system
+      - security-tools
+      - tigera-operator
+
+# =============================================================================
+# CONSTRAINT TEMPLATE + CONSTRAINT: Require Non-Root User
+# =============================================================================
+
+---
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8srequirenonroot
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sRequireNonRoot
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8srequirenonroot
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          not container.securityContext.runAsNonRoot
+          msg := sprintf("Container '%v' must set securityContext.runAsNonRoot to true.", [container.name])
+        }
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          container.securityContext.runAsUser == 0
+          msg := sprintf("Container '%v' must not run as root (UID 0).", [container.name])
+        }
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRequireNonRoot
+metadata:
+  name: require-non-root-containers
+  labels:
+    policy-category: security
+    severity: high
+spec:
+  enforcementAction: warn
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+      - apiGroups: ["apps"]
+        kinds: ["Deployment", "StatefulSet"]
+    excludedNamespaces:
+      - kube-system
+      - kube-public
+      - security-tools
+      - tigera-operator
+      - amazon-cloudwatch
+
+# =============================================================================
+# CONSTRAINT TEMPLATE + CONSTRAINT: Require Read-Only Root Filesystem
+# =============================================================================
+
+---
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8sreadonlyrootfs
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sReadOnlyRootFs
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8sreadonlyrootfs
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          not container.securityContext.readOnlyRootFilesystem
+          msg := sprintf("Container '%v' must set readOnlyRootFilesystem to true.", [container.name])
+        }
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sReadOnlyRootFs
+metadata:
+  name: require-readonly-rootfs
+  labels:
+    policy-category: security
+    severity: medium
+spec:
+  enforcementAction: warn
+  match:
+    kinds:
+      - apiGroups: ["apps"]
+        kinds: ["Deployment", "StatefulSet"]
+    excludedNamespaces:
+      - kube-system
+      - kube-public
+      - gatekeeper-system
+      - argocd
+      - monitoring
+      - security-tools
+
+# =============================================================================
+# CONSTRAINT TEMPLATE + CONSTRAINT: Allowed Registries
+# Only images from approved registries may be deployed.
+# =============================================================================
+
+---
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8sallowedregistries
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sAllowedRegistries
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties:
+            registries:
+              type: array
+              items:
+                type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8sallowedregistries
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          not registry_allowed(container.image)
+          msg := sprintf("Container '%v' image '%v' is not from an allowed registry. Allowed: %v", [container.name, container.image, input.parameters.registries])
+        }
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.initContainers[_]
+          not registry_allowed(container.image)
+          msg := sprintf("Init container '%v' image '%v' is not from an allowed registry.", [container.name, container.image])
+        }
+
+        registry_allowed(image) {
+          registry := input.parameters.registries[_]
+          startswith(image, registry)
+        }
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sAllowedRegistries
+metadata:
+  name: allowed-container-registries
+  labels:
+    policy-category: supply-chain
+    severity: critical
+spec:
+  enforcementAction: deny
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+      - apiGroups: ["apps"]
+        kinds: ["Deployment", "StatefulSet", "DaemonSet"]
+    excludedNamespaces:
+      - kube-system
+      - kube-public
+      - gatekeeper-system
+  parameters:
+    registries:
+      - "123456789012.dkr.ecr.us-east-1.amazonaws.com/"
+      - "public.ecr.aws/"
+      - "docker.io/library/"
+      - "ghcr.io/"
+      - "registry.k8s.io/"
+      - "quay.io/"

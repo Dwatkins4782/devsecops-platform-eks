@@ -1,0 +1,291 @@
+###############################################################################
+# Network Policies
+# Implements zero-trust networking with default-deny-all and explicit
+# allow rules for authorized communication paths.
+###############################################################################
+
+# =============================================================================
+# DEFAULT DENY ALL — Baseline for zero-trust networking
+# =============================================================================
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all-ingress
+  namespace: production
+  labels:
+    app.kubernetes.io/managed-by: argocd
+    policy-type: baseline
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all-egress
+  namespace: production
+  labels:
+    app.kubernetes.io/managed-by: argocd
+    policy-type: baseline
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+
+# =============================================================================
+# DNS EGRESS — Allow all pods to resolve DNS
+# =============================================================================
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: production
+  labels:
+    app.kubernetes.io/managed-by: argocd
+    policy-type: infrastructure
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+# =============================================================================
+# MONITORING — Allow Prometheus to scrape all pods
+# =============================================================================
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-scraping
+  namespace: production
+  labels:
+    app.kubernetes.io/managed-by: argocd
+    policy-type: monitoring
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: 9090
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 8443
+        - protocol: TCP
+          port: 9091
+
+# =============================================================================
+# APPLICATION TIER — Frontend to backend communication
+# =============================================================================
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-frontend-to-backend
+  namespace: production
+  labels:
+    app.kubernetes.io/managed-by: argocd
+    policy-type: application
+spec:
+  podSelector:
+    matchLabels:
+      tier: backend
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              tier: frontend
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 8443
+
+# =============================================================================
+# DATABASE TIER — Only backend can access databases
+# =============================================================================
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-backend-to-database
+  namespace: production
+  labels:
+    app.kubernetes.io/managed-by: argocd
+    policy-type: application
+spec:
+  podSelector:
+    matchLabels:
+      tier: database
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              tier: backend
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 3306
+        - protocol: TCP
+          port: 6379
+
+# =============================================================================
+# INGRESS CONTROLLER — Allow external traffic to frontend
+# =============================================================================
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-frontend
+  namespace: production
+  labels:
+    app.kubernetes.io/managed-by: argocd
+    policy-type: ingress
+spec:
+  podSelector:
+    matchLabels:
+      tier: frontend
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 8443
+
+# =============================================================================
+# BACKEND EGRESS — Allow backend to reach external APIs and databases
+# =============================================================================
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-backend-egress
+  namespace: production
+  labels:
+    app.kubernetes.io/managed-by: argocd
+    policy-type: application
+spec:
+  podSelector:
+    matchLabels:
+      tier: backend
+  policyTypes:
+    - Egress
+  egress:
+    # DNS resolution
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Database access within namespace
+    - to:
+        - podSelector:
+            matchLabels:
+              tier: database
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 3306
+        - protocol: TCP
+          port: 6379
+    # HTTPS egress to external APIs
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+
+# =============================================================================
+# SECURITY TOOLS — Allow Falco and Trivy communication
+# =============================================================================
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-security-tools-egress
+  namespace: security-tools
+  labels:
+    app.kubernetes.io/managed-by: argocd
+    policy-type: security
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Kubernetes API server
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+    # Push metrics to Prometheus
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9090

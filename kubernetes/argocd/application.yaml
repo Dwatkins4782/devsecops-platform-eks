@@ -1,0 +1,181 @@
+###############################################################################
+# ArgoCD Application CRD
+# Defines the root application that manages all Kubernetes resources
+# deployed via GitOps from this repository.
+###############################################################################
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: devsecops-platform
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: "DevSecOps Platform - Production EKS Infrastructure"
+  sourceRepos:
+    - "https://github.com/devsecops-org/devsecops-platform-eks.git"
+  destinations:
+    - namespace: "*"
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+    - group: networking.k8s.io
+      kind: NetworkPolicy
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRoleBinding
+    - group: constraints.gatekeeper.sh
+      kind: "*"
+    - group: templates.gatekeeper.sh
+      kind: ConstraintTemplate
+  namespaceResourceBlacklist:
+    - group: ""
+      kind: ResourceQuota
+    - group: ""
+      kind: LimitRange
+  roles:
+    - name: platform-admin
+      description: "Full access to all applications in the project"
+      policies:
+        - "p, proj:devsecops-platform:platform-admin, applications, *, devsecops-platform/*, allow"
+      groups:
+        - platform-engineering
+    - name: developer
+      description: "Read-only access with sync permissions"
+      policies:
+        - "p, proj:devsecops-platform:developer, applications, get, devsecops-platform/*, allow"
+        - "p, proj:devsecops-platform:developer, applications, sync, devsecops-platform/*, allow"
+      groups:
+        - developers
+---
+###############################################################################
+# Root Application — App of Apps Pattern
+###############################################################################
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: devsecops-platform-root
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: devsecops-platform
+    app.kubernetes.io/part-of: devsecops-platform
+    app.kubernetes.io/managed-by: argocd
+  annotations:
+    argocd.argoproj.io/manifest-generate-paths: .
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: devsecops-platform
+  source:
+    repoURL: https://github.com/devsecops-org/devsecops-platform-eks.git
+    targetRevision: main
+    path: kubernetes
+    directory:
+      recurse: true
+      include: "*.yaml"
+      exclude: "argocd/*"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+      - ServerSideApply=true
+      - RespectIgnoreDifferences=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+      jqPathExpressions:
+        - ".webhooks[]?.clientConfig.caBundle"
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      jqPathExpressions:
+        - ".webhooks[]?.clientConfig.caBundle"
+  revisionHistoryLimit: 10
+---
+###############################################################################
+# Security Policies Application
+###############################################################################
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: security-policies
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: security-policies
+    app.kubernetes.io/part-of: devsecops-platform
+  annotations:
+    notifications.argoproj.io/subscribe.on-sync-failed.slack: security-alerts
+spec:
+  project: devsecops-platform
+  source:
+    repoURL: https://github.com/devsecops-org/devsecops-platform-eks.git
+    targetRevision: main
+    path: kubernetes/security-policies
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 1m
+---
+###############################################################################
+# Monitoring Application
+###############################################################################
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: monitoring-configs
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: monitoring-configs
+    app.kubernetes.io/part-of: devsecops-platform
+spec:
+  project: devsecops-platform
+  source:
+    repoURL: https://github.com/devsecops-org/devsecops-platform-eks.git
+    targetRevision: main
+    path: kubernetes/monitoring
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 1m

@@ -1,0 +1,257 @@
+###############################################################################
+# PrometheusRule — Security Alerting Rules
+# Defines alerts for Falco events, OPA violations, Trivy findings,
+# suspicious API access, certificate expiry, and resource anomalies.
+###############################################################################
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: security-alerts
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: security-alerts
+    app.kubernetes.io/part-of: devsecops-platform
+    prometheus: kube-prometheus-stack
+    release: kube-prometheus-stack
+spec:
+  groups:
+    # =========================================================================
+    # Falco Runtime Security Alerts
+    # =========================================================================
+    - name: falco-security-alerts
+      interval: 30s
+      rules:
+        - alert: FalcoCriticalAlert
+          expr: |
+            increase(falco_events{priority="Critical"}[5m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+            team: security
+            category: runtime-security
+          annotations:
+            summary: "Falco critical security event detected"
+            description: "Falco detected {{ $value }} critical event(s) in the last 5 minutes on {{ $labels.instance }}. Immediate investigation required."
+            runbook_url: "https://wiki.internal/runbooks/falco-critical"
+
+        - alert: FalcoHighRateWarnings
+          expr: |
+            rate(falco_events{priority=~"Warning|Error"}[10m]) > 5
+          for: 5m
+          labels:
+            severity: warning
+            team: security
+            category: runtime-security
+          annotations:
+            summary: "High rate of Falco security warnings"
+            description: "Falco is generating {{ $value | humanize }} warnings per second. This may indicate an active attack or misconfiguration."
+
+        - alert: FalcoPrivilegeEscalation
+          expr: |
+            increase(falco_events{rule=~".*privilege.*|.*escalat.*"}[5m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+            team: security
+            category: privilege-escalation
+          annotations:
+            summary: "Privilege escalation attempt detected by Falco"
+            description: "A privilege escalation attempt was detected. Rule: {{ $labels.rule }}."
+
+    # =========================================================================
+    # OPA Gatekeeper Policy Alerts
+    # =========================================================================
+    - name: gatekeeper-policy-alerts
+      interval: 60s
+      rules:
+        - alert: GatekeeperAuditViolations
+          expr: |
+            gatekeeper_violations > 0
+          for: 5m
+          labels:
+            severity: warning
+            team: security
+            category: policy-enforcement
+          annotations:
+            summary: "OPA Gatekeeper audit violations detected"
+            description: "Gatekeeper found {{ $value }} policy violation(s) for constraint {{ $labels.constraint_name }} of kind {{ $labels.constraint_kind }}."
+
+        - alert: GatekeeperWebhookDenials
+          expr: |
+            rate(gatekeeper_admission_webhook_denied_total[10m]) > 1
+          for: 5m
+          labels:
+            severity: warning
+            team: security
+            category: policy-enforcement
+          annotations:
+            summary: "High rate of Gatekeeper admission denials"
+            description: "Gatekeeper is denying {{ $value | humanize }} requests per second. Someone may be repeatedly attempting to deploy non-compliant resources."
+
+        - alert: GatekeeperWebhookErrors
+          expr: |
+            rate(gatekeeper_admission_webhook_errors_total[5m]) > 0
+          for: 5m
+          labels:
+            severity: critical
+            team: platform
+            category: policy-enforcement
+          annotations:
+            summary: "OPA Gatekeeper webhook errors"
+            description: "Gatekeeper webhook is experiencing errors. Policy enforcement may be degraded."
+
+    # =========================================================================
+    # Trivy Vulnerability Scanning Alerts
+    # =========================================================================
+    - name: trivy-vulnerability-alerts
+      interval: 300s
+      rules:
+        - alert: TrivyCriticalVulnerabilities
+          expr: |
+            trivy_image_vulnerabilities{severity="Critical"} > 0
+          for: 10m
+          labels:
+            severity: critical
+            team: security
+            category: vulnerability-management
+          annotations:
+            summary: "Critical vulnerabilities found in running workload"
+            description: "Image {{ $labels.image_repository }}:{{ $labels.image_tag }} has {{ $value }} critical vulnerabilities in namespace {{ $labels.namespace }}."
+
+        - alert: TrivyHighVulnerabilities
+          expr: |
+            trivy_image_vulnerabilities{severity="High"} > 10
+          for: 30m
+          labels:
+            severity: warning
+            team: security
+            category: vulnerability-management
+          annotations:
+            summary: "High number of HIGH severity vulnerabilities"
+            description: "Image {{ $labels.image_repository }}:{{ $labels.image_tag }} has {{ $value }} high-severity vulnerabilities."
+
+        - alert: TrivyConfigAuditFailure
+          expr: |
+            trivy_resource_configaudits{severity="Critical"} > 0
+          for: 10m
+          labels:
+            severity: warning
+            team: platform
+            category: misconfiguration
+          annotations:
+            summary: "Critical misconfiguration detected by Trivy"
+            description: "Resource {{ $labels.resource_name }} in namespace {{ $labels.namespace }} has {{ $value }} critical misconfigurations."
+
+    # =========================================================================
+    # Kubernetes API Security Alerts
+    # =========================================================================
+    - name: kubernetes-api-security
+      interval: 60s
+      rules:
+        - alert: UnauthorizedAPIAccess
+          expr: |
+            increase(apiserver_audit_event_total{verb!="get",verb!="list",verb!="watch",code=~"401|403"}[10m]) > 10
+          for: 5m
+          labels:
+            severity: warning
+            team: security
+            category: access-control
+          annotations:
+            summary: "High rate of unauthorized Kubernetes API access"
+            description: "Detected {{ $value }} unauthorized API requests in the last 10 minutes."
+
+        - alert: SuspiciousAPIServerActivity
+          expr: |
+            increase(apiserver_audit_event_total{verb="delete",resource=~"secrets|configmaps|roles|clusterroles"}[10m]) > 5
+          for: 2m
+          labels:
+            severity: warning
+            team: security
+            category: access-control
+          annotations:
+            summary: "Suspicious deletion activity on sensitive resources"
+            description: "{{ $value }} delete operations detected on {{ $labels.resource }} resources in the last 10 minutes."
+
+    # =========================================================================
+    # Certificate and Secret Alerts
+    # =========================================================================
+    - name: certificate-secret-alerts
+      interval: 3600s
+      rules:
+        - alert: CertificateExpiringSoon
+          expr: |
+            (certmanager_certificate_expiration_timestamp_seconds - time()) / 86400 < 30
+          for: 1h
+          labels:
+            severity: warning
+            team: platform
+            category: certificate-management
+          annotations:
+            summary: "TLS certificate expiring within 30 days"
+            description: "Certificate {{ $labels.name }} in namespace {{ $labels.namespace }} expires in {{ $value | humanize }} days."
+
+        - alert: CertificateExpiryCritical
+          expr: |
+            (certmanager_certificate_expiration_timestamp_seconds - time()) / 86400 < 7
+          for: 1h
+          labels:
+            severity: critical
+            team: platform
+            category: certificate-management
+          annotations:
+            summary: "TLS certificate expiring within 7 days"
+            description: "Certificate {{ $labels.name }} in namespace {{ $labels.namespace }} expires in {{ $value | humanize }} days. Immediate renewal required."
+
+    # =========================================================================
+    # Node Security Alerts
+    # =========================================================================
+    - name: node-security-alerts
+      interval: 60s
+      rules:
+        - alert: NodeNotReady
+          expr: |
+            kube_node_status_condition{condition="Ready",status="true"} == 0
+          for: 5m
+          labels:
+            severity: critical
+            team: platform
+            category: infrastructure
+          annotations:
+            summary: "Kubernetes node is not ready"
+            description: "Node {{ $labels.node }} has been in NotReady state for more than 5 minutes."
+
+        - alert: NodeHighCPUUsage
+          expr: |
+            (1 - avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m]))) * 100 > 90
+          for: 15m
+          labels:
+            severity: warning
+            team: platform
+            category: resource-exhaustion
+          annotations:
+            summary: "Node CPU usage above 90%"
+            description: "Node {{ $labels.instance }} CPU usage is {{ $value | humanize }}%. Potential resource exhaustion or crypto-mining."
+
+        - alert: NodeHighMemoryUsage
+          expr: |
+            (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 90
+          for: 15m
+          labels:
+            severity: warning
+            team: platform
+            category: resource-exhaustion
+          annotations:
+            summary: "Node memory usage above 90%"
+            description: "Node {{ $labels.instance }} memory usage is {{ $value | humanize }}%."
+
+        - alert: PodCrashLooping
+          expr: |
+            increase(kube_pod_container_status_restarts_total[1h]) > 5
+          for: 10m
+          labels:
+            severity: warning
+            team: platform
+            category: application-health
+          annotations:
+            summary: "Pod is crash looping"
+            description: "Pod {{ $labels.namespace }}/{{ $labels.pod }} has restarted {{ $value }} times in the last hour."

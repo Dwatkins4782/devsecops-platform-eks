@@ -1,0 +1,305 @@
+###############################################################################
+# ArgoCD Helm Values
+# Configuration for ArgoCD with SSO, RBAC, notifications, HA, and security.
+###############################################################################
+
+global:
+  image:
+    tag: "v2.10.4"
+  logging:
+    format: json
+    level: info
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+
+# -----------------------------------------------------------------------------
+# Server Configuration
+# -----------------------------------------------------------------------------
+server:
+  replicas: 2
+
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 70
+
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  ingress:
+    enabled: true
+    annotations:
+      kubernetes.io/ingress.class: alb
+      alb.ingress.kubernetes.io/scheme: internal
+      alb.ingress.kubernetes.io/target-type: ip
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+      alb.ingress.kubernetes.io/backend-protocol: HTTPS
+      alb.ingress.kubernetes.io/healthcheck-path: /healthz
+    hosts:
+      - argocd.internal.devsecops-platform.com
+    tls:
+      - secretName: argocd-server-tls
+        hosts:
+          - argocd.internal.devsecops-platform.com
+
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+      namespace: monitoring
+      additionalLabels:
+        release: kube-prometheus-stack
+
+  extraArgs:
+    - --insecure=false
+
+# -----------------------------------------------------------------------------
+# SSO / OIDC Configuration
+# -----------------------------------------------------------------------------
+  config:
+    url: https://argocd.internal.devsecops-platform.com
+
+    oidc.config: |
+      name: Okta
+      issuer: https://sso.devsecops-platform.com
+      clientID: $oidc.okta.clientId
+      clientSecret: $oidc.okta.clientSecret
+      requestedScopes:
+        - openid
+        - profile
+        - email
+        - groups
+      requestedIDTokenClaims:
+        groups:
+          essential: true
+
+    statusbadge.enabled: "true"
+    resource.exclusions: |
+      - apiGroups:
+          - tekton.dev
+        clusters:
+          - '*'
+        kinds:
+          - TaskRun
+          - PipelineRun
+    resource.compareoptions: |
+      ignoreAggregatedRoles: true
+
+# -----------------------------------------------------------------------------
+# RBAC Configuration
+# -----------------------------------------------------------------------------
+  rbacConfig:
+    policy.default: role:readonly
+    policy.csv: |
+      # Platform engineers get admin access
+      g, platform-engineering, role:admin
+
+      # Developers can view and sync applications
+      p, role:developer, applications, get, */*, allow
+      p, role:developer, applications, sync, */*, allow
+      p, role:developer, logs, get, */*, allow
+      p, role:developer, exec, create, */*, deny
+      g, developers, role:developer
+
+      # Security team can view all and manage security policies
+      p, role:security-viewer, applications, get, */*, allow
+      p, role:security-viewer, clusters, get, *, allow
+      p, role:security-viewer, repositories, get, *, allow
+      p, role:security-viewer, logs, get, */*, allow
+      g, security-team, role:security-viewer
+
+      # CI system account for automated sync
+      p, role:ci-bot, applications, sync, */*, allow
+      p, role:ci-bot, applications, get, */*, allow
+      g, ci-bot, role:ci-bot
+    scopes: "[groups]"
+
+# -----------------------------------------------------------------------------
+# Controller
+# -----------------------------------------------------------------------------
+controller:
+  replicas: 2
+
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+      namespace: monitoring
+      additionalLabels:
+        release: kube-prometheus-stack
+
+  env:
+    - name: ARGOCD_CONTROLLER_REPLICAS
+      value: "2"
+
+# -----------------------------------------------------------------------------
+# Repo Server
+# -----------------------------------------------------------------------------
+repoServer:
+  replicas: 2
+
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 70
+
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+      namespace: monitoring
+      additionalLabels:
+        release: kube-prometheus-stack
+
+  env:
+    - name: HELM_CACHE_HOME
+      value: /helm-working-dir
+    - name: HELM_CONFIG_HOME
+      value: /helm-working-dir
+    - name: HELM_DATA_HOME
+      value: /helm-working-dir
+
+# -----------------------------------------------------------------------------
+# ApplicationSet Controller
+# -----------------------------------------------------------------------------
+applicationSet:
+  replicas: 2
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# -----------------------------------------------------------------------------
+# Notifications
+# -----------------------------------------------------------------------------
+notifications:
+  enabled: true
+
+  argocdUrl: https://argocd.internal.devsecops-platform.com
+
+  secret:
+    create: false
+    name: argocd-notifications-secret
+
+  notifiers:
+    service.slack: |
+      token: $slack-token
+
+  subscriptions:
+    - recipients:
+        - slack:deployments
+      triggers:
+        - on-sync-succeeded
+        - on-sync-failed
+        - on-health-degraded
+    - recipients:
+        - slack:security-alerts
+      triggers:
+        - on-sync-failed
+
+  templates:
+    template.app-sync-succeeded: |
+      message: |
+        Application {{.app.metadata.name}} sync succeeded.
+        Revision: {{.app.status.sync.revision}}
+        Environment: {{.app.spec.destination.namespace}}
+      slack:
+        attachments: |
+          [{
+            "color": "#18be52",
+            "title": "{{.app.metadata.name}} - Sync Succeeded",
+            "fields": [
+              {"title": "Application", "value": "{{.app.metadata.name}}", "short": true},
+              {"title": "Revision", "value": "{{.app.status.sync.revision | trunc 8}}", "short": true}
+            ]
+          }]
+
+    template.app-sync-failed: |
+      message: |
+        Application {{.app.metadata.name}} sync FAILED.
+        Revision: {{.app.status.sync.revision}}
+      slack:
+        attachments: |
+          [{
+            "color": "#E96D76",
+            "title": "{{.app.metadata.name}} - Sync Failed",
+            "fields": [
+              {"title": "Application", "value": "{{.app.metadata.name}}", "short": true},
+              {"title": "Revision", "value": "{{.app.status.sync.revision | trunc 8}}", "short": true}
+            ]
+          }]
+
+    template.app-health-degraded: |
+      message: |
+        Application {{.app.metadata.name}} health is DEGRADED.
+      slack:
+        attachments: |
+          [{
+            "color": "#f4c030",
+            "title": "{{.app.metadata.name}} - Health Degraded",
+            "fields": [
+              {"title": "Application", "value": "{{.app.metadata.name}}", "short": true},
+              {"title": "Health", "value": "{{.app.status.health.status}}", "short": true}
+            ]
+          }]
+
+  triggers:
+    trigger.on-sync-succeeded: |
+      - when: app.status.operationState.phase in ['Succeeded']
+        send: [app-sync-succeeded]
+    trigger.on-sync-failed: |
+      - when: app.status.operationState.phase in ['Error', 'Failed']
+        send: [app-sync-failed]
+    trigger.on-health-degraded: |
+      - when: app.status.health.status == 'Degraded'
+        send: [app-health-degraded]
+
+# -----------------------------------------------------------------------------
+# Redis (HA)
+# -----------------------------------------------------------------------------
+redis:
+  enabled: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+redis-ha:
+  enabled: false
+
+# -----------------------------------------------------------------------------
+# Dex (Disabled — using OIDC directly)
+# -----------------------------------------------------------------------------
+dex:
+  enabled: false
