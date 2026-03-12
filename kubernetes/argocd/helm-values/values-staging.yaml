@@ -1,0 +1,45 @@
+###############################################################################
+# ArgoCD Helm Values — STAGING Environment Override
+#
+# Staging is a middle ground: more resources than dev, fewer than prod.
+# Auto-scaling is enabled but with lower thresholds.
+###############################################################################
+
+server:
+  replicas: 1
+  autoscaling:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 80
+  ingress:
+    hosts:
+      - argocd.staging.devsecops-platform.com
+    tls:
+      - secretName: argocd-server-tls
+        hosts:
+          - argocd.staging.devsecops-platform.com
+  config:
+    url: https://argocd.staging.devsecops-platform.com
+
+controller:
+  replicas: 1
+
+repoServer:
+  replicas: 1
+  autoscaling:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 3
+
+applicationSet:
+  replicas: 1
+
+notifications:
+  argocdUrl: https://argocd.staging.devsecops-platform.com
+  subscriptions:
+    - recipients:
+        - slack:alerts-staging
+      triggers:
+        - on-sync-succeeded
+        - on-sync-failed

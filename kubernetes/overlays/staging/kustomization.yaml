@@ -1,0 +1,68 @@
+###############################################################################
+# KUSTOMIZE OVERLAY — Staging
+#
+# WHAT THIS FILE DOES:
+#   Staging mirrors production closely but with SOME relaxations:
+#     - OPA: Keep most "deny" constraints, change a few to "warn"
+#     - Alerts: Slightly longer thresholds before firing
+#     - Pod Security: "baseline" enforcement (warns on restricted)
+#
+# WHY THESE SPECIFIC CHANGES?
+#   Staging should catch policy violations (warn) without blocking deploys
+#   that are still being iterated on. Critical constraints (privileged,
+#   latest tag) stay as "deny" to prevent truly dangerous misconfigurations.
+#
+# HOW PATCHES WORK:
+#   A "patch" tells Kustomize: "Find this specific piece of YAML in the
+#   base, and REPLACE just the values I specify." Everything else in the
+#   base stays exactly as-is.
+#
+#   Think of it like a surgical edit — you're changing one field in a
+#   200-line YAML file without copying the entire file.
+###############################################################################
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Start with the base (production-grade) resources
+resources:
+  - ../../base/security-policies
+  - ../../base/monitoring
+
+# Add staging-specific labels to all resources
+commonLabels:
+  environment: staging
+
+# -------------------------------------------------------------------------
+# PATCHES: Surgical modifications to base resources
+#
+# Each patch targets a specific resource and changes specific fields.
+# Format: JSON Patch (RFC 6902) — a list of operations (replace, add, remove)
+# -------------------------------------------------------------------------
+patches:
+  # --- Relax Non-Root requirement to "warn" instead of "deny" ---
+  # In staging, we WARN about non-root containers (so devs see the issue)
+  # but don't BLOCK the deployment
+  - target:
+      group: constraints.gatekeeper.sh
+      version: v1beta1
+      kind: K8sRequireNonRoot
+      name: require-non-root-containers
+    patch: |-
+      - op: replace
+        path: /spec/enforcementAction
+        value: warn
+
+  # --- Relax Read-Only Root Filesystem to "warn" ---
+  - target:
+      group: constraints.gatekeeper.sh
+      version: v1beta1
+      kind: K8sReadOnlyRootFs
+      name: require-readonly-rootfs
+    patch: |-
+      - op: replace
+        path: /spec/enforcementAction
+        value: warn
+
+  # --- Apply staging-specific alert thresholds ---
+  - path: patch-prometheus-rules.yaml

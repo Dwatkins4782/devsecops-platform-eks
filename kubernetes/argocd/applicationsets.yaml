@@ -1,0 +1,217 @@
+###############################################################################
+# ArgoCD ApplicationSets — Multi-Environment Application Generator
+#
+# WHAT THIS FILE DOES:
+#   Instead of manually writing one ArgoCD Application per environment,
+#   an ApplicationSet acts as a TEMPLATE that automatically GENERATES
+#   Applications for each environment (dev, staging, prod).
+#
+# HOW IT WORKS:
+#   1. The "generators" section defines a LIST of environments with their
+#      specific settings (which Git branch, which cluster, sync behavior)
+#   2. The "template" section is a blueprint for an ArgoCD Application
+#   3. ArgoCD combines each list item with the template to CREATE real
+#      Application resources automatically
+#
+#   Example: The list has 3 environments, so ArgoCD creates 3 Applications:
+#     - security-policies-dev    (watches develop branch)
+#     - security-policies-staging (watches staging branch)
+#     - security-policies-prod    (watches main branch)
+#
+# WHY NOT HAND-WRITE EACH APPLICATION?
+#   With 3 environments and 2 app types, that's 6 nearly-identical YAML
+#   files to maintain. ApplicationSet reduces this to 2 templates.
+#   Adding a new environment = adding 3 lines to the generators list.
+#
+# WHAT CALLS THIS:
+#   ArgoCD's ApplicationSet Controller (running in the argocd namespace)
+#   watches for ApplicationSet resources and creates/updates/deletes
+#   the generated Applications automatically.
+###############################################################################
+
+# =============================================================================
+# APPLICATION SET 1: Security Policies
+#
+# Deploys OPA constraints, NetworkPolicies, Pod Security Standards, and RBAC
+# to each environment using Kustomize overlays.
+#
+# Flow: Git repo → Kustomize overlay (per env) → Kubernetes cluster
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: devsecops-security-policies
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: devsecops-platform
+spec:
+  # ---------------------------------------------------------------------------
+  # GENERATORS: Define each environment and its specific settings
+  #
+  # Each item in "elements" becomes available as {{variable}} in the template.
+  # When ArgoCD processes this, it creates one Application per element.
+  # ---------------------------------------------------------------------------
+  generators:
+    - list:
+        elements:
+          # --- DEV ENVIRONMENT ---
+          - environment: dev
+            # Which Git branch to watch for changes
+            targetRevision: develop
+            # Which Kubernetes cluster to deploy to
+            # (https://kubernetes.default.svc = the cluster ArgoCD runs on)
+            clusterUrl: https://kubernetes.default.svc
+            # Which Kustomize overlay directory to use
+            overlayPath: kubernetes/overlays/dev
+            # Sync behavior: auto-sync ON, but don't auto-delete (safe for dev)
+            prune: "false"
+            selfHeal: "false"
+
+          # --- STAGING ENVIRONMENT ---
+          - environment: staging
+            targetRevision: staging
+            clusterUrl: https://kubernetes.default.svc
+            overlayPath: kubernetes/overlays/staging
+            # Staging: auto-sync ON, auto-prune ON (clean up removed resources)
+            prune: "true"
+            selfHeal: "false"
+
+          # --- PRODUCTION ENVIRONMENT ---
+          - environment: prod
+            targetRevision: main
+            clusterUrl: https://kubernetes.default.svc
+            overlayPath: kubernetes/overlays/prod
+            # Prod: full auto-sync with prune AND self-heal
+            # selfHeal=true means ArgoCD reverts any manual kubectl changes
+            prune: "true"
+            selfHeal: "true"
+
+  # ---------------------------------------------------------------------------
+  # TEMPLATE: Blueprint for the generated Applications
+  #
+  # {{environment}}, {{targetRevision}}, etc. are replaced with values
+  # from each generator element above.
+  # ---------------------------------------------------------------------------
+  template:
+    metadata:
+      # Name includes environment: security-policies-dev, security-policies-staging, etc.
+      name: "security-policies-{{environment}}"
+      namespace: argocd
+      labels:
+        app.kubernetes.io/name: security-policies
+        app.kubernetes.io/part-of: devsecops-platform
+        environment: "{{environment}}"
+      annotations:
+        # Send Slack notification on sync failure
+        notifications.argoproj.io/subscribe.on-sync-failed.slack: "alerts-{{environment}}"
+    spec:
+      # Reference the AppProject we defined in appproject.yaml
+      project: devsecops-platform
+
+      # WHERE TO GET THE MANIFESTS FROM
+      source:
+        repoURL: https://github.com/Dwatkins4782/devsecops-platform-eks.git
+        # Watch this branch (different per environment)
+        targetRevision: "{{targetRevision}}"
+        # Path to the Kustomize overlay for this environment
+        # ArgoCD auto-detects Kustomize when it finds kustomization.yaml
+        path: "{{overlayPath}}"
+
+      # WHERE TO DEPLOY THE MANIFESTS TO
+      destination:
+        server: "{{clusterUrl}}"
+        # Security policies are cluster-scoped or go to the env namespace
+        namespace: "{{environment}}"
+
+      # HOW TO SYNC (deploy) CHANGES
+      syncPolicy:
+        automated:
+          # prune: delete resources from cluster if removed from Git
+          prune: true
+          # selfHeal: revert manual changes made via kubectl
+          selfHeal: true
+        syncOptions:
+          # Create the namespace if it doesn't exist
+          - CreateNamespace=true
+          # Use server-side apply for better conflict handling
+          - ServerSideApply=true
+        # Retry on failure
+        retry:
+          limit: 3
+          backoff:
+            duration: 5s
+            factor: 2
+            maxDuration: 1m
+
+      # Ignore certain differences that are expected
+      # (e.g., replica count changes from HPA auto-scaling)
+      ignoreDifferences:
+        - group: apps
+          kind: Deployment
+          jsonPointers:
+            - /spec/replicas
+
+---
+# =============================================================================
+# APPLICATION SET 2: Monitoring Configs
+#
+# Deploys Prometheus alerting rules and Grafana dashboards to each
+# environment's monitoring namespace.
+#
+# Flow: Git repo → Kustomize overlay → monitoring namespace
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: devsecops-monitoring-configs
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: devsecops-platform
+spec:
+  generators:
+    - list:
+        elements:
+          - environment: dev
+            targetRevision: develop
+            clusterUrl: https://kubernetes.default.svc
+            overlayPath: kubernetes/overlays/dev
+
+          - environment: staging
+            targetRevision: staging
+            clusterUrl: https://kubernetes.default.svc
+            overlayPath: kubernetes/overlays/staging
+
+          - environment: prod
+            targetRevision: main
+            clusterUrl: https://kubernetes.default.svc
+            overlayPath: kubernetes/overlays/prod
+
+  template:
+    metadata:
+      name: "monitoring-configs-{{environment}}"
+      namespace: argocd
+      labels:
+        app.kubernetes.io/name: monitoring-configs
+        app.kubernetes.io/part-of: devsecops-platform
+        environment: "{{environment}}"
+    spec:
+      project: devsecops-platform
+      source:
+        repoURL: https://github.com/Dwatkins4782/devsecops-platform-eks.git
+        targetRevision: "{{targetRevision}}"
+        path: "{{overlayPath}}"
+      destination:
+        server: "{{clusterUrl}}"
+        namespace: monitoring
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+        retry:
+          limit: 3
+          backoff:
+            duration: 5s
+            factor: 2
+            maxDuration: 1m

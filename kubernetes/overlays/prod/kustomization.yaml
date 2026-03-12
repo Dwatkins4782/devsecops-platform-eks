@@ -1,0 +1,29 @@
+###############################################################################
+# KUSTOMIZE OVERLAY — Production
+#
+# WHAT THIS FILE DOES:
+#   Production uses the base AS-IS with NO patches. The base already
+#   contains production-grade settings (strict enforcement, tight thresholds).
+#
+# WHY NO PATCHES?
+#   Our base is designed to be "production-ready by default":
+#     - OPA constraints: enforcementAction = deny (strictest)
+#     - Pod Security: enforce = restricted (strictest)
+#     - Alert thresholds: tight (catch issues early)
+#     - Network policies: deny all by default
+#
+#   This is intentional — it's safer to START strict and RELAX for dev/staging
+#   than to start loose and try to remember to tighten for production.
+###############################################################################
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Include all base resources unchanged
+resources:
+  - ../../base/security-policies
+  - ../../base/monitoring
+
+# Add production-specific labels
+commonLabels:
+  environment: prod

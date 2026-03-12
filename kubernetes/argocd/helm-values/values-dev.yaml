@@ -1,0 +1,80 @@
+###############################################################################
+# ArgoCD Helm Values — DEV Environment Override
+#
+# WHAT THIS FILE DOES:
+#   Overrides the base argocd-values.yaml with dev-specific settings.
+#   In dev, we run fewer replicas, disable auto-scaling, and use a
+#   dev-specific domain to save costs and simplify debugging.
+#
+# HOW IT'S USED:
+#   When installing ArgoCD via Helm for the dev environment:
+#     helm upgrade argocd argo/argo-cd \
+#       -f argocd-values.yaml \        # Base values (loaded first)
+#       -f helm-values/values-dev.yaml  # Dev overrides (loaded second, wins)
+#
+# MERGE BEHAVIOR:
+#   Helm merges values files left-to-right. If both files define
+#   server.replicas, the LAST file loaded wins. So this file's
+#   server.replicas: 1 overrides the base's server.replicas: 2.
+###############################################################################
+
+# --- Server: Single replica, no auto-scaling ---
+server:
+  replicas: 1
+  autoscaling:
+    enabled: false
+  ingress:
+    hosts:
+      - argocd.dev.devsecops-platform.com
+    tls:
+      - secretName: argocd-server-tls
+        hosts:
+          - argocd.dev.devsecops-platform.com
+  config:
+    url: https://argocd.dev.devsecops-platform.com
+  # Smaller resource allocation for dev
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+
+# --- Controller: Single replica ---
+controller:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+# --- Repo Server: Single replica, no auto-scaling ---
+repoServer:
+  replicas: 1
+  autoscaling:
+    enabled: false
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# --- ApplicationSet Controller: Single replica ---
+applicationSet:
+  replicas: 1
+
+# --- Notifications: Dev-specific Slack channel ---
+notifications:
+  argocdUrl: https://argocd.dev.devsecops-platform.com
+  subscriptions:
+    - recipients:
+        - slack:alerts-dev
+      triggers:
+        - on-sync-failed
+        # Only notify on failures in dev (not on every sync)

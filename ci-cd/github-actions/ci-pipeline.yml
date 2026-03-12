@@ -1,14 +1,30 @@
 ###############################################################################
-# GitHub Actions CI/CD Pipeline
-# Multi-stage pipeline: lint, security scan, build, terraform plan/apply,
-# deploy to EKS via ArgoCD, and promote through environments.
+# GitHub Actions CI/CD Pipeline — Multi-Environment
+#
+# WHAT THIS PIPELINE DOES:
+#   Automates the entire flow from code commit to production deployment:
+#     1. LINT: Check code formatting and validate configs
+#     2. SECURITY SCAN: Run 5 different security scanners
+#     3. BUILD: Build container image, push to ECR, scan for vulnerabilities
+#     4. TERRAFORM PLAN: Preview infrastructure changes (on Pull Requests)
+#     5. DEPLOY: Deploy to the correct environment based on which branch
+#
+# ENVIRONMENT PROMOTION FLOW:
+#   develop branch  → deploys to DEV environment
+#   staging branch  → deploys to STAGING environment
+#   main branch     → deploys to PRODUCTION environment
+#
+# HOW THE MATRIX STRATEGY WORKS:
+#   Instead of duplicating the deploy job 3 times (once per environment),
+#   we use a "matrix" — GitHub Actions runs the SAME job with different
+#   variable values. The `include` array maps each branch to its env settings.
 ###############################################################################
 
 name: DevSecOps CI/CD Pipeline
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, develop, staging]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -19,6 +35,7 @@ on:
         default: "staging"
         type: choice
         options:
+          - dev
           - staging
           - prod
 
@@ -31,7 +48,6 @@ permissions:
 env:
   AWS_REGION: us-east-1
   ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com
-  EKS_CLUSTER_NAME: devsecops-prod-cluster
   TERRAFORM_VERSION: "1.6.6"
   TERRAGRUNT_VERSION: "0.54.12"
 
@@ -45,6 +61,9 @@ concurrency:
 jobs:
   # ===========================================================================
   # Stage 1: Lint and Static Analysis
+  #
+  # Runs on EVERY push and PR. Checks that code is properly formatted
+  # and syntactically valid before wasting time on security scans.
   # ===========================================================================
   lint:
     name: Lint and Static Analysis
@@ -94,6 +113,13 @@ jobs:
 
   # ===========================================================================
   # Stage 2: Security Scanning
+  #
+  # Runs 5 scanners in parallel:
+  #   - tfsec: Terraform-specific security issues
+  #   - Checkov: Broad IaC misconfiguration detection
+  #   - Trivy: Filesystem vulnerability scanning
+  #   - Kubescape: K8s manifest security (NSA/MITRE frameworks)
+  #   - Gitleaks: Secret detection in code
   # ===========================================================================
   security-scan:
     name: Security Scanning
@@ -173,6 +199,9 @@ jobs:
 
   # ===========================================================================
   # Stage 3: Build and Push Container Images
+  #
+  # Only runs on push events (not PRs). Builds the Docker image, pushes
+  # to ECR, then scans the BUILT image for vulnerabilities.
   # ===========================================================================
   build:
     name: Build Container Images
@@ -237,13 +266,26 @@ jobs:
           category: trivy-image
 
   # ===========================================================================
-  # Stage 4: Terraform Plan
+  # Stage 4: Terraform Plan (Pull Requests Only)
+  #
+  # MATRIX STRATEGY: Runs Terraform plan for ALL environments in parallel.
+  # This lets PR reviewers see the impact on every environment at once.
   # ===========================================================================
   terraform-plan:
-    name: Terraform Plan
+    name: "Terraform Plan (${{ matrix.environment }})"
     runs-on: ubuntu-latest
     needs: security-scan
     if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - environment: dev
+            terraform_dir: terraform/environments/dev
+          - environment: staging
+            terraform_dir: terraform/environments/staging
+          - environment: prod
+            terraform_dir: terraform/environments/prod
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -267,7 +309,7 @@ jobs:
       - name: Terragrunt Plan
         id: plan
         run: |
-          cd terraform/environments/prod
+          cd ${{ matrix.terraform_dir }}
           terragrunt plan -no-color -out=tfplan 2>&1 | tee plan-output.txt
         env:
           TF_VAR_grafana_admin_password: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
@@ -275,11 +317,10 @@ jobs:
 
       - name: Comment PR with Plan
         uses: actions/github-script@v7
-        if: github.event_name == 'pull_request'
         with:
           script: |
             const fs = require('fs');
-            const plan = fs.readFileSync('terraform/environments/prod/plan-output.txt', 'utf8');
+            const plan = fs.readFileSync('${{ matrix.terraform_dir }}/plan-output.txt', 'utf8');
             const truncated = plan.length > 60000
               ? plan.substring(0, 60000) + '\n... (truncated)'
               : plan;
@@ -288,146 +329,169 @@ jobs:
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: `## Terraform Plan Results\n\n<details><summary>Show Plan</summary>\n\n\`\`\`terraform\n${truncated}\n\`\`\`\n\n</details>`
+              body: `## Terraform Plan — ${{ matrix.environment }}\n\n<details><summary>Show Plan</summary>\n\n\`\`\`terraform\n${truncated}\n\`\`\`\n\n</details>`
             });
 
   # ===========================================================================
-  # Stage 5: Deploy to Staging
+  # Stage 5: Deploy to Environment
+  #
+  # MATRIX STRATEGY explained:
+  #   The "include" array maps Git branches to environment configs:
+  #     - Push to "develop" → deploy to dev
+  #     - Push to "staging" → deploy to staging
+  #     - Push to "main"    → deploy to prod
+  #
+  #   Each matrix entry provides:
+  #     - environment: Human-readable name
+  #     - branch: Which Git branch triggers this environment
+  #     - cluster_name: EKS cluster name for kubectl
+  #     - terraform_dir: Where to run terragrunt apply
+  #     - url: Environment URL for GitHub environment display
+  #
+  # The "branch-check" step ensures only the matching
+  # environment deploys (we don't deploy to prod on a develop push).
   # ===========================================================================
-  deploy-staging:
-    name: Deploy to Staging
+  deploy:
+    name: "Deploy to ${{ matrix.environment }}"
     runs-on: ubuntu-latest
     needs: build
-    if: github.ref == 'refs/heads/develop'
+    if: github.event_name == 'push'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - environment: dev
+            branch: refs/heads/develop
+            cluster_name: devsecops-dev-cluster
+            terraform_dir: terraform/environments/dev
+            url: https://dev.devsecops-platform.com
+
+          - environment: staging
+            branch: refs/heads/staging
+            cluster_name: devsecops-staging-cluster
+            terraform_dir: terraform/environments/staging
+            url: https://staging.devsecops-platform.com
+
+          - environment: prod
+            branch: refs/heads/main
+            cluster_name: devsecops-prod-cluster
+            terraform_dir: terraform/environments/prod
+            url: https://devsecops-platform.com
+
     environment:
-      name: staging
-      url: https://staging.devsecops-platform.com
+      name: ${{ matrix.environment }}
+      url: ${{ matrix.url }}
+
     steps:
+      - name: Check branch match
+        id: branch-check
+        run: |
+          if [ "${{ github.ref }}" != "${{ matrix.branch }}" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "Branch ${{ github.ref }} does not match ${{ matrix.branch }}, skipping"
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "Branch matches, proceeding with deployment"
+          fi
+
       - name: Checkout repository
+        if: steps.branch-check.outputs.skip != 'true'
         uses: actions/checkout@v4
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Update kubeconfig
-        run: aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
-
-      - name: Sync ArgoCD Application (staging)
-        run: |
-          argocd app sync devsecops-platform-staging \
-            --server argocd.internal.devsecops-platform.com \
-            --auth-token ${{ secrets.ARGOCD_AUTH_TOKEN }} \
-            --grpc-web \
-            --revision ${{ github.sha }} \
-            --prune \
-            --timeout 300
-
-      - name: Wait for ArgoCD Health
-        run: |
-          argocd app wait devsecops-platform-staging \
-            --server argocd.internal.devsecops-platform.com \
-            --auth-token ${{ secrets.ARGOCD_AUTH_TOKEN }} \
-            --grpc-web \
-            --health \
-            --timeout 600
-
-      - name: Run smoke tests
-        run: |
-          kubectl run smoke-test --image=curlimages/curl:latest --rm -i --restart=Never -- \
-            curl -sf http://app-service.staging.svc.cluster.local/health || exit 1
-          echo "Smoke tests passed"
-
-  # ===========================================================================
-  # Stage 6: Promote to Production
-  # ===========================================================================
-  deploy-production:
-    name: Deploy to Production
-    runs-on: ubuntu-latest
-    needs: build
-    if: github.ref == 'refs/heads/main'
-    environment:
-      name: production
-      url: https://devsecops-platform.com
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
+        if: steps.branch-check.outputs.skip != 'true'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Setup Terragrunt
+        if: steps.branch-check.outputs.skip != 'true'
         uses: autero1/action-terragrunt@v3
         with:
           terragrunt-version: ${{ env.TERRAGRUNT_VERSION }}
 
       - name: Terragrunt Apply
+        if: steps.branch-check.outputs.skip != 'true'
         run: |
-          cd terraform/environments/prod
+          cd ${{ matrix.terraform_dir }}
           terragrunt apply -auto-approve -no-color
         env:
           TF_VAR_grafana_admin_password: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
           TF_VAR_slack_webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
 
       - name: Update kubeconfig
-        run: aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
-
-      - name: Sync ArgoCD Application (production)
+        if: steps.branch-check.outputs.skip != 'true'
         run: |
-          argocd app sync devsecops-platform-root \
-            --server argocd.internal.devsecops-platform.com \
-            --auth-token ${{ secrets.ARGOCD_AUTH_TOKEN }} \
-            --grpc-web \
-            --revision ${{ github.sha }} \
-            --prune \
-            --timeout 300
+          aws eks update-kubeconfig \
+            --name ${{ matrix.cluster_name }} \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Sync ArgoCD Applications
+        if: steps.branch-check.outputs.skip != 'true'
+        run: |
+          for app in security-policies monitoring-configs; do
+            echo "Syncing ${app}-${{ matrix.environment }}..."
+            argocd app sync "${app}-${{ matrix.environment }}" \
+              --server argocd.internal.devsecops-platform.com \
+              --auth-token ${{ secrets.ARGOCD_AUTH_TOKEN }} \
+              --grpc-web \
+              --revision ${{ github.sha }} \
+              --prune \
+              --timeout 300
+          done
 
       - name: Wait for ArgoCD Health
+        if: steps.branch-check.outputs.skip != 'true'
         run: |
-          argocd app wait devsecops-platform-root \
-            --server argocd.internal.devsecops-platform.com \
-            --auth-token ${{ secrets.ARGOCD_AUTH_TOKEN }} \
-            --grpc-web \
-            --health \
-            --timeout 600
+          for app in security-policies monitoring-configs; do
+            echo "Waiting for ${app}-${{ matrix.environment }} to be healthy..."
+            argocd app wait "${app}-${{ matrix.environment }}" \
+              --server argocd.internal.devsecops-platform.com \
+              --auth-token ${{ secrets.ARGOCD_AUTH_TOKEN }} \
+              --grpc-web \
+              --health \
+              --timeout 600
+          done
+
+      - name: Run smoke tests
+        if: steps.branch-check.outputs.skip != 'true'
+        run: |
+          echo "=== Running Smoke Tests for ${{ matrix.environment }} ==="
+          kubectl run smoke-test \
+            --image=curlimages/curl:latest \
+            --rm -i --restart=Never -- \
+            curl -sf http://app-service.${{ matrix.environment }}.svc.cluster.local/health || exit 1
+          echo "Smoke tests passed for ${{ matrix.environment }}"
 
       - name: Run security validation
+        if: steps.branch-check.outputs.skip != 'true' && matrix.environment == 'prod'
         run: |
           echo "=== Validating Security Controls ==="
-
           echo "Checking Gatekeeper status..."
           kubectl get constrainttemplates
           kubectl get constraints
-
           echo "Checking Falco status..."
           kubectl get pods -n security-tools -l app.kubernetes.io/name=falco
-
           echo "Checking Trivy Operator..."
           kubectl get vulnerabilityreports -A --no-headers | wc -l
-
           echo "Checking Network Policies..."
           kubectl get networkpolicies -A
-
           echo "=== Security Validation Complete ==="
 
       - name: Post deployment notification
-        if: always()
+        if: always() && steps.branch-check.outputs.skip != 'true'
         uses: slackapi/slack-github-action@v1.25.0
         with:
           payload: |
             {
-              "text": "Production Deployment: ${{ job.status }}",
+              "text": "${{ matrix.environment }} Deployment: ${{ job.status }}",
               "blocks": [
                 {
                   "type": "section",
                   "text": {
                     "type": "mrkdwn",
-                    "text": "*Production Deployment ${{ job.status == 'success' && 'Succeeded' || 'Failed' }}*\nCommit: `${{ github.sha }}`\nActor: ${{ github.actor }}\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"
+                    "text": "*${{ matrix.environment }} Deployment ${{ job.status == 'success' && 'Succeeded' || 'Failed' }}*\nCommit: `${{ github.sha }}`\nActor: ${{ github.actor }}\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"
                   }
                 }
               ]

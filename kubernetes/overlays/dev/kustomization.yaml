@@ -1,0 +1,129 @@
+###############################################################################
+# KUSTOMIZE OVERLAY — Dev Environment
+#
+# WHAT THIS FILE DOES:
+#   Development environment gets the MOST relaxed settings:
+#     - ALL OPA constraints set to "warn" (never block deploys in dev)
+#     - Pod Security changed from "restricted" to "baseline"
+#     - Alert thresholds greatly increased (minimal alert noise)
+#     - Longer "for" durations on all alerts
+#
+# WHY SO RELAXED?
+#   Developers need to iterate quickly. Blocking a deploy because a
+#   container runs as root would slow down development significantly.
+#   Instead, we WARN so they're aware of the issue, and the STAGING
+#   and PROD environments enforce the stricter rules.
+#
+# THIS IS STILL VALUABLE:
+#   Even though nothing is blocked, developers SEE the warnings and
+#   can fix issues early. It's much easier to fix a "runs as root"
+#   warning in dev than to discover it when promoting to staging.
+###############################################################################
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Start with the base (production-grade) resources
+resources:
+  - ../../base/security-policies
+  - ../../base/monitoring
+
+# Add dev-specific labels to all resources
+commonLabels:
+  environment: dev
+
+# -------------------------------------------------------------------------
+# PATCHES: Relax everything for dev
+# -------------------------------------------------------------------------
+patches:
+  # --- Relax ALL OPA constraints to "warn" ---
+
+  # Required labels: warn instead of deny
+  - target:
+      group: constraints.gatekeeper.sh
+      version: v1beta1
+      kind: K8sRequiredLabels
+      name: require-mandatory-labels
+    patch: |-
+      - op: replace
+        path: /spec/enforcementAction
+        value: warn
+
+  # Block latest tag: warn instead of deny
+  - target:
+      group: constraints.gatekeeper.sh
+      version: v1beta1
+      kind: K8sBlockLatestImages
+      name: block-latest-image-tag
+    patch: |-
+      - op: replace
+        path: /spec/enforcementAction
+        value: warn
+
+  # Resource limits: warn instead of deny
+  - target:
+      group: constraints.gatekeeper.sh
+      version: v1beta1
+      kind: K8sRequireResourceLimits
+      name: require-resource-limits
+    patch: |-
+      - op: replace
+        path: /spec/enforcementAction
+        value: warn
+
+  # Privileged containers: warn instead of deny (even this is relaxed in dev)
+  - target:
+      group: constraints.gatekeeper.sh
+      version: v1beta1
+      kind: K8sDisallowPrivileged
+      name: disallow-privileged-containers
+    patch: |-
+      - op: replace
+        path: /spec/enforcementAction
+        value: warn
+
+  # Non-root: keep as warn (already warn in base)
+  - target:
+      group: constraints.gatekeeper.sh
+      version: v1beta1
+      kind: K8sRequireNonRoot
+      name: require-non-root-containers
+    patch: |-
+      - op: replace
+        path: /spec/enforcementAction
+        value: warn
+
+  # Read-only rootfs: keep as warn
+  - target:
+      group: constraints.gatekeeper.sh
+      version: v1beta1
+      kind: K8sReadOnlyRootFs
+      name: require-readonly-rootfs
+    patch: |-
+      - op: replace
+        path: /spec/enforcementAction
+        value: warn
+
+  # Allowed registries: warn instead of deny (devs may use local registries)
+  - target:
+      group: constraints.gatekeeper.sh
+      version: v1beta1
+      kind: K8sAllowedRegistries
+      name: allowed-container-registries
+    patch: |-
+      - op: replace
+        path: /spec/enforcementAction
+        value: warn
+
+  # --- Relax Pod Security from "restricted" to "baseline" ---
+  - target:
+      version: v1
+      kind: Namespace
+      name: production
+    patch: |-
+      - op: replace
+        path: /metadata/labels/pod-security.kubernetes.io~1enforce
+        value: baseline
+
+  # --- Apply dev-specific alert thresholds ---
+  - path: patch-prometheus-rules.yaml

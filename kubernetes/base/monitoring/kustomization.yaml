@@ -1,0 +1,32 @@
+###############################################################################
+# KUSTOMIZE BASE — Monitoring Configuration
+#
+# WHAT THIS FILE DOES:
+#   Lists the monitoring resources (Prometheus rules, Grafana dashboards)
+#   that make up the base monitoring layer.
+#
+# The base contains production-level alerting thresholds.
+# Dev and staging overlays relax thresholds so developers aren't
+# overwhelmed with alerts during development.
+###############################################################################
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - prometheus-rules.yaml
+
+# Grafana dashboard JSON is a ConfigMap generator
+# This auto-creates a ConfigMap from the JSON file
+configMapGenerator:
+  - name: grafana-dashboard-security
+    namespace: monitoring
+    files:
+      - grafana-dashboard-security.json
+    options:
+      labels:
+        grafana_dashboard: "true"
+
+commonLabels:
+  app.kubernetes.io/part-of: devsecops-platform
+  app.kubernetes.io/managed-by: kustomize

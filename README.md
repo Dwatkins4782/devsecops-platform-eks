@@ -1,8 +1,12 @@
-# DevSecOps Platform -- Multi-Cloud Security Infrastructure
+# DevSecOps Platform -- Multi-Environment Security Infrastructure
 
 Production-grade DevSecOps platform built on Amazon EKS with comprehensive security tooling,
-GitOps-driven deployments, and full observability. Designed to demonstrate enterprise-level
-infrastructure engineering, security automation, and operational excellence.
+GitOps-driven deployments, and full observability. Supports **multi-environment promotion**
+(dev → staging → prod) with environment-specific configurations managed through
+Terragrunt, Kustomize, and ArgoCD ApplicationSets.
+
+> **New here?** Read the [Multi-Environment Guide](docs/MULTI-ENV-GUIDE.md) for a complete
+> beginner-friendly walkthrough of how everything connects.
 
 ---
 
@@ -15,41 +19,27 @@ infrastructure engineering, security automation, and operational excellence.
                             |  (Lint/Scan/Build/Deploy) |
                             +------------+--------------+
                                          |
-                                         | GitOps Sync
-                                         v
+                      Branch-based routing (matrix strategy):
+                      develop → DEV | staging → STAGING | main → PROD
+                                         |
                     +--------------------+--------------------+
                     |              ArgoCD (GitOps)            |
-                    |        Continuous Delivery Engine       |
+                    |   ApplicationSets auto-generate apps    |
+                    |   per environment from templates        |
                     +--------------------+--------------------+
                                          |
           +------------------------------+-------------------------------+
           |                              |                               |
           v                              v                               v
 +-------------------+      +-------------------------+      +---------------------+
-|  Security Tools   |      |    EKS Cluster (prod)   |      |   Monitoring Stack  |
+|  Security Tools   |      | EKS Clusters (per env)  |      |   Monitoring Stack  |
 |                   |      |                         |      |                     |
-|  - Falco          |      |  +-------------------+  |      |  - Prometheus       |
-|  - Trivy Operator |      |  | Worker Nodes (ASG)|  |      |  - Grafana          |
-|  - OPA Gatekeeper |      |  | t3.xlarge x 3-10  |  |      |  - Alertmanager     |
-|  - Pod Security   |      |  +-------------------+  |      |  - CloudWatch       |
-|  - Network Policy |      |  | OIDC / IRSA       |  |      |  - Loki (Logs)      |
-+-------------------+      |  | KMS Encryption    |  |      +---------------------+
-                            |  | Calico CNI        |  |
-                            |  +-------------------+  |
-                            +-------------------------+
-                                         |
-          +------------------------------+-------------------------------+
-          |                              |                               |
-          v                              v                               v
+|  - Falco          |      |  DEV:  1x t3.medium     |      |  - Prometheus       |
+|  - Trivy Operator |      |  STG:  2x t3.large      |      |  - Grafana          |
+|  - OPA Gatekeeper |      |  PROD: 3x t3.xlarge     |      |  - Alertmanager     |
+|  - Pod Security   |      |                         |      |  - CloudWatch       |
+|  - Network Policy |      |  OIDC / IRSA / KMS      |      |  - Loki (Logs)      |
 +-------------------+      +-------------------------+      +---------------------+
-|  VPC / Networking |      |   IAM / Identity        |      |  Secrets / KMS      |
-|                   |      |                         |      |                     |
-|  - 3 AZ Subnets   |      |  - Least Privilege      |      |  - Envelope Encrypt |
-|  - Public/Private |      |  - IRSA (Pod Identity)  |      |  - Secrets Manager  |
-|  - NAT Gateway    |      |  - OIDC Federation      |      |  - etcd Encryption  |
-|  - VPC Flow Logs  |      |  - Node IAM Roles       |      |  - KMS Key Rotation |
-|  - Route Tables   |      +-------------------------+      +---------------------+
-+-------------------+
 
 Data Flow:
   Developer --> GitHub --> Actions CI --> ECR --> ArgoCD --> EKS
@@ -66,22 +56,93 @@ Data Flow:
 ```
 devsecops-platform-eks/
 |-- terraform/
+|   |-- terragrunt.hcl                  # Root config (shared by all environments)
+|   |-- _envcommon/                     # Shared module configurations
+|   |   |-- networking.hcl
+|   |   |-- eks-cluster.hcl
+|   |   |-- monitoring.hcl
+|   |   +-- security-tools.hcl
 |   |-- modules/
-|   |   |-- eks-cluster/          # EKS cluster with encryption, OIDC, IRSA
-|   |   |-- networking/           # VPC, subnets, NAT, flow logs
-|   |   |-- monitoring/           # Prometheus, Grafana, Alertmanager
-|   |   +-- security-tools/       # Falco, Trivy, OPA Gatekeeper
+|   |   |-- eks-cluster/                # EKS cluster with encryption, OIDC, IRSA
+|   |   |-- networking/                 # VPC, subnets, NAT, flow logs
+|   |   |-- monitoring/                 # Prometheus, Grafana, Alertmanager
+|   |   +-- security-tools/             # Falco, Trivy, OPA Gatekeeper
 |   +-- environments/
-|       +-- prod/                 # Production root module + Terragrunt
+|       |-- dev/                        # Dev: t3.medium, 1 node, warn-only
+|       |   |-- env.hcl
+|       |   +-- terragrunt.hcl
+|       |-- staging/                    # Staging: t3.large, 2 nodes, mixed
+|       |   |-- env.hcl
+|       |   +-- terragrunt.hcl
+|       +-- prod/                       # Prod: t3.xlarge, 3+ nodes, strict
+|           |-- env.hcl
+|           |-- terragrunt.hcl
+|           +-- main.tf                 # Shared Terraform code (all envs use this)
+|
 |-- kubernetes/
-|   |-- argocd/                   # ArgoCD Application CRDs and values
-|   |-- security-policies/        # Pod security, network policies, OPA
-|   +-- monitoring/               # Prometheus rules, Grafana dashboards
+|   |-- base/                           # Kustomize base (production-grade defaults)
+|   |   |-- security-policies/          # Pod security, network policies, OPA
+|   |   +-- monitoring/                 # Prometheus rules, Grafana dashboards
+|   |-- overlays/                       # Per-environment Kustomize patches
+|   |   |-- dev/                        # All OPA → warn, relaxed alerts
+|   |   |-- staging/                    # Mixed OPA, moderate alerts
+|   |   +-- prod/                       # Uses base as-is (strictest)
+|   +-- argocd/                         # ArgoCD GitOps configuration
+|       |-- appproject.yaml             # Project security boundary + RBAC
+|       |-- applicationsets.yaml        # Auto-generates apps per environment
+|       |-- argocd-values.yaml          # Base Helm values for ArgoCD
+|       +-- helm-values/               # Per-env ArgoCD configuration
+|           |-- values-dev.yaml
+|           |-- values-staging.yaml
+|           +-- values-prod.yaml
+|
 |-- ci-cd/
-|   +-- github-actions/           # Multi-stage CI/CD pipeline
-|-- scripts/                      # Security audit and incident response
-+-- docs/                         # Architecture and runbook documentation
+|   +-- github-actions/
+|       +-- ci-pipeline.yml             # Multi-env pipeline with matrix strategy
+|
+|-- scripts/                            # Security audit and incident response
+|   |-- security-audit.sh
+|   +-- incident-response.py
+|
++-- docs/
+    |-- MULTI-ENV-GUIDE.md              # Comprehensive beginner guide
+    +-- INTERVIEW-PREP-SR-DEVOPS-ENGINEER.md
 ```
+
+---
+
+## Multi-Environment Strategy
+
+### Environment Promotion Flow
+
+```
+develop branch  ──→  DEV cluster   ──→  Test & iterate
+                         |
+staging branch  ──→  STAGING cluster ──→  Pre-production validation
+                         |
+main branch     ──→  PROD cluster  ──→  Live traffic
+```
+
+### Configuration Layers
+
+| Layer | Tool | Purpose | Where |
+|-------|------|---------|-------|
+| **Infrastructure** | Terragrunt | VPC, EKS, nodes per env | `terraform/environments/` |
+| **K8s Policies** | Kustomize | OPA, NetworkPolicy per env | `kubernetes/overlays/` |
+| **GitOps Delivery** | ArgoCD ApplicationSet | Auto-deploy per env | `kubernetes/argocd/` |
+| **ArgoCD Config** | Helm Values | ArgoCD itself per env | `kubernetes/argocd/helm-values/` |
+| **CI/CD** | GitHub Actions Matrix | Build & deploy per env | `ci-cd/github-actions/` |
+
+### Key Differences by Environment
+
+| Setting | Dev | Staging | Prod |
+|---------|-----|---------|------|
+| Node type | t3.medium | t3.large | t3.xlarge |
+| Nodes (min/max) | 1/3 | 2/5 | 3/10 |
+| OPA enforcement | All warn | Mixed | All deny |
+| Alert thresholds | Relaxed | Moderate | Tight |
+| ArgoCD self-heal | Off | Off | On |
+| Git branch | develop | staging | main |
 
 ---
 
@@ -91,18 +152,17 @@ devsecops-platform-eks/
 |----------------------|-----------------------------------|----------------------------------------------|
 | **Orchestration**    | Amazon EKS (Kubernetes 1.29)      | Container orchestration and workload runtime  |
 | **IaC**              | Terraform + Terragrunt            | Infrastructure provisioning and state mgmt    |
-| **GitOps**           | ArgoCD                            | Declarative continuous delivery               |
-| **CI/CD**            | GitHub Actions                    | Build, test, scan, and deployment automation  |
+| **GitOps**           | ArgoCD + ApplicationSets          | Declarative continuous delivery               |
+| **CI/CD**            | GitHub Actions (Matrix Strategy)  | Multi-env build, test, scan, and deployment   |
 | **Monitoring**       | Prometheus + Grafana              | Metrics collection and visualization          |
 | **Alerting**         | Alertmanager + CloudWatch         | Incident notification and escalation          |
 | **Runtime Security** | Falco                             | Real-time threat detection via syscall audit  |
 | **Image Scanning**   | Trivy Operator                    | Continuous vulnerability scanning in-cluster  |
 | **Policy Engine**    | OPA Gatekeeper                    | Kubernetes admission control policies         |
+| **K8s Customization**| Kustomize (Base + Overlays)       | Per-environment manifest patching             |
 | **Networking**       | Calico CNI + Network Policies     | Pod-level network segmentation                |
 | **Encryption**       | AWS KMS                           | Envelope encryption for etcd and secrets      |
 | **Identity**         | IRSA (IAM Roles for SAs)          | Pod-level AWS IAM with OIDC federation        |
-| **Logging**          | VPC Flow Logs + CloudWatch Logs   | Network and application log aggregation       |
-| **Scripting**        | Bash + Python                     | Security auditing and incident response       |
 
 ---
 
@@ -117,33 +177,43 @@ devsecops-platform-eks/
 - Helm >= 3.14
 - ArgoCD CLI (optional)
 
-### Deploy Infrastructure
+### Deploy a Single Environment
 
 ```bash
-# Initialize and deploy with Terragrunt
-cd terraform/environments/prod
+# Deploy dev infrastructure
+cd terraform/environments/dev
 terragrunt init
 terragrunt plan -out=tfplan
 terragrunt apply tfplan
 
 # Configure kubectl
-aws eks update-kubeconfig --name devsecops-prod-cluster --region us-east-1
+aws eks update-kubeconfig --name devsecops-dev-cluster --region us-east-1
 
 # Verify cluster
 kubectl get nodes
 kubectl get pods -A
 ```
 
-### Deploy Security Tools
+### Deploy All Environments
 
 ```bash
-# ArgoCD handles deployment via GitOps
-# Verify ArgoCD applications
-kubectl get applications -n argocd
+cd terraform
+terragrunt run-all plan      # Plan all environments in parallel
+terragrunt run-all apply     # Apply all environments
+```
 
-# Manual security audit
-chmod +x scripts/security-audit.sh
-./scripts/security-audit.sh
+### Preview Kustomize Output
+
+```bash
+# See what dev produces
+kubectl kustomize kubernetes/overlays/dev/
+
+# See what prod produces
+kubectl kustomize kubernetes/overlays/prod/
+
+# Compare dev vs prod
+diff <(kubectl kustomize kubernetes/overlays/dev/) \
+     <(kubectl kustomize kubernetes/overlays/prod/)
 ```
 
 ---
@@ -152,6 +222,7 @@ chmod +x scripts/security-audit.sh
 
 - **Defense in Depth**: Multiple layers of security controls from network to runtime
 - **Zero Trust Networking**: Default-deny network policies with explicit allow rules
+- **Progressive Enforcement**: Policies warn in dev, deny in prod
 - **Immutable Infrastructure**: Container images are scanned and signed before deployment
 - **Least Privilege IAM**: IRSA provides pod-level AWS permissions via OIDC federation
 - **Encryption at Rest**: KMS-managed encryption for etcd, EBS volumes, and secrets
@@ -162,19 +233,10 @@ chmod +x scripts/security-audit.sh
 
 ---
 
-## Monitoring and Alerting
+## Documentation
 
-Prometheus collects metrics from all cluster components and security tools.
-Grafana provides dashboards for security posture, cluster health, and resource utilization.
-Alertmanager routes critical alerts to Slack and PagerDuty.
-
-Key alert categories:
-- Falco runtime security events (critical severity)
-- OPA policy violations and audit failures
-- Trivy vulnerability scan results (HIGH/CRITICAL)
-- Node resource exhaustion and pod eviction
-- Certificate expiration warnings
-- Unauthorized API server access attempts
+- [Multi-Environment Guide](docs/MULTI-ENV-GUIDE.md) — Complete beginner walkthrough
+- [Interview Prep](docs/INTERVIEW-PREP-SR-DEVOPS-ENGINEER.md) — DevOps interview preparation
 
 ---
 

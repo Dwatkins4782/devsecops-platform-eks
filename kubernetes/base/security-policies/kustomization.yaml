@@ -1,0 +1,33 @@
+###############################################################################
+# KUSTOMIZE BASE — Security Policies
+#
+# WHAT THIS FILE DOES:
+#   Lists all the security policy YAML files that make up the "base" layer.
+#   Kustomize reads this file to know which resources to include.
+#
+# WHAT IS A "BASE"?
+#   The base contains the STRICTEST version of everything (production settings).
+#   Dev and staging overlays then RELAX specific settings as needed.
+#   This "strict by default" approach prevents accidentally deploying
+#   weak security to production.
+#
+# HOW OVERLAYS USE THIS:
+#   Each overlay's kustomization.yaml has a "resources" entry pointing here:
+#     resources:
+#       - ../../base/security-policies
+#   That tells Kustomize: "Start with everything in this base, then apply
+#   my patches on top."
+###############################################################################
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - pod-security.yaml
+  - network-policies.yaml
+  - opa-constraints.yaml
+
+# Common labels added to ALL resources in this base
+commonLabels:
+  app.kubernetes.io/part-of: devsecops-platform
+  app.kubernetes.io/managed-by: kustomize

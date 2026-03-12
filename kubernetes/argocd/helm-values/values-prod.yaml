@@ -1,0 +1,27 @@
+###############################################################################
+# ArgoCD Helm Values — PRODUCTION Environment Override
+#
+# WHAT THIS FILE DOES:
+#   Production uses the base argocd-values.yaml almost as-is because
+#   the base file IS the production configuration (HA, 2 replicas,
+#   auto-scaling, full monitoring). This file only overrides the
+#   minimal settings that must be explicitly set per-environment.
+#
+# WHY IS IT MOSTLY EMPTY?
+#   The base argocd-values.yaml was already designed for production.
+#   Rather than duplicating 300 lines, we only override what's unique.
+###############################################################################
+
+# Production-specific values (base handles everything else)
+notifications:
+  subscriptions:
+    - recipients:
+        - slack:deployments-prod
+      triggers:
+        - on-sync-succeeded
+        - on-sync-failed
+        - on-health-degraded
+    - recipients:
+        - slack:security-alerts-prod
+      triggers:
+        - on-sync-failed

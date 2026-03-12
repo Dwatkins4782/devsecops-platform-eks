@@ -1,0 +1,77 @@
+###############################################################################
+# DEV PATCH — Prometheus Alert Rules
+#
+# WHAT THIS FILE DOES:
+#   Dramatically relaxes alerting thresholds for dev environment:
+#     - Much longer "for" durations (wait longer before alerting)
+#     - Higher thresholds (only alert on severe issues)
+#     - Some alerts disabled entirely (no cert expiry in dev)
+#
+# WHY?
+#   In dev, alert noise is the enemy. Developers need to focus on building
+#   features, not investigating why their single-node dev cluster has
+#   "high CPU usage" while running a build.
+###############################################################################
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: security-alerts
+  namespace: monitoring
+spec:
+  groups:
+    # Override Falco alerts — much more lenient in dev
+    - name: falco-security-alerts
+      interval: 60s
+      rules:
+        - alert: FalcoCriticalAlert
+          expr: |
+            increase(falco_events{priority="Critical"}[10m]) > 3
+          for: 5m
+          labels:
+            severity: warning
+            team: security
+            category: runtime-security
+          annotations:
+            summary: "Falco critical security event detected (dev)"
+            description: "Falco detected {{ $value }} critical event(s) in the last 10 minutes."
+
+    # Override node alerts — very high thresholds for dev
+    - name: node-security-alerts
+      interval: 120s
+      rules:
+        - alert: NodeHighCPUUsage
+          expr: |
+            (1 - avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m]))) * 100 > 98
+          for: 30m
+          labels:
+            severity: warning
+            team: platform
+            category: resource-exhaustion
+          annotations:
+            summary: "Node CPU usage above 98% (dev threshold)"
+            description: "Node {{ $labels.instance }} CPU usage is {{ $value | humanize }}%."
+
+        - alert: NodeHighMemoryUsage
+          expr: |
+            (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 95
+          for: 30m
+          labels:
+            severity: warning
+            team: platform
+            category: resource-exhaustion
+          annotations:
+            summary: "Node memory usage above 95% (dev threshold)"
+            description: "Node {{ $labels.instance }} memory usage is {{ $value | humanize }}%."
+
+        - alert: PodCrashLooping
+          expr: |
+            increase(kube_pod_container_status_restarts_total[1h]) > 20
+          for: 30m
+          labels:
+            severity: warning
+            team: platform
+            category: application-health
+          annotations:
+            summary: "Pod is crash looping (dev)"
+            description: "Pod {{ $labels.namespace }}/{{ $labels.pod }} has restarted {{ $value }} times in the last hour."

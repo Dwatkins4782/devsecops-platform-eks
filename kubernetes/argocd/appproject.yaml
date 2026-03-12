@@ -1,0 +1,106 @@
+###############################################################################
+# ArgoCD AppProject — Multi-Environment Project Definition
+#
+# WHAT THIS FILE DOES:
+#   Defines a "project" in ArgoCD that acts as a security boundary.
+#   All our applications (dev, staging, prod) belong to this project.
+#   It controls:
+#     - Which Git repos ArgoCD can pull from
+#     - Which clusters/namespaces apps can deploy to
+#     - Which Kubernetes resource types apps can create
+#     - Who can do what (RBAC roles)
+#
+# WHY IT EXISTS:
+#   Without a project, all ArgoCD apps go into the "default" project
+#   which has no restrictions. In enterprise environments, you want
+#   to limit what each team's ArgoCD apps can do.
+#
+# HOW IT'S USED:
+#   The ApplicationSet (applicationsets.yaml) references this project
+#   via `spec.template.spec.project: devsecops-platform`
+###############################################################################
+
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: devsecops-platform
+  namespace: argocd
+  # Finalizer prevents accidental deletion — ArgoCD will clean up apps first
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: "DevSecOps Platform — Multi-Environment Security Infrastructure"
+
+  # -------------------------------------------------------------------------
+  # SOURCE REPOS: Which Git repositories ArgoCD is allowed to pull from
+  # -------------------------------------------------------------------------
+  sourceRepos:
+    - "https://github.com/Dwatkins4782/devsecops-platform-eks.git"
+
+  # -------------------------------------------------------------------------
+  # DESTINATIONS: Which clusters + namespaces apps can deploy to
+  # The "*" for namespace means any namespace is allowed
+  # -------------------------------------------------------------------------
+  destinations:
+    # All environments deploy to the local cluster for now
+    # In multi-cluster setups, you'd add remote cluster URLs here
+    - namespace: "*"
+      server: https://kubernetes.default.svc
+
+  # -------------------------------------------------------------------------
+  # CLUSTER RESOURCES: Which cluster-scoped resources apps can create
+  # (Cluster-scoped = not in any namespace, applies to entire cluster)
+  # -------------------------------------------------------------------------
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+    - group: networking.k8s.io
+      kind: NetworkPolicy
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRoleBinding
+    # OPA Gatekeeper constraint resources are cluster-scoped
+    - group: constraints.gatekeeper.sh
+      kind: "*"
+    - group: templates.gatekeeper.sh
+      kind: ConstraintTemplate
+
+  # -------------------------------------------------------------------------
+  # NAMESPACE RESOURCE BLACKLIST: Resources apps CANNOT create
+  # (We manage quotas and limit ranges via Kustomize overlays, not ad-hoc)
+  # -------------------------------------------------------------------------
+  namespaceResourceBlacklist:
+    - group: ""
+      kind: ResourceQuota
+    - group: ""
+      kind: LimitRange
+
+  # -------------------------------------------------------------------------
+  # RBAC ROLES: Who can do what within this project
+  # -------------------------------------------------------------------------
+  roles:
+    - name: platform-admin
+      description: "Full access to all applications in all environments"
+      policies:
+        - "p, proj:devsecops-platform:platform-admin, applications, *, devsecops-platform/*, allow"
+      groups:
+        - platform-engineering
+
+    - name: developer
+      description: "Can view all apps and sync dev/staging (not prod)"
+      policies:
+        # Developers can view everything
+        - "p, proj:devsecops-platform:developer, applications, get, devsecops-platform/*, allow"
+        # Developers can sync dev and staging apps (name contains -dev or -staging)
+        - "p, proj:devsecops-platform:developer, applications, sync, devsecops-platform/*-dev, allow"
+        - "p, proj:devsecops-platform:developer, applications, sync, devsecops-platform/*-staging, allow"
+      groups:
+        - developers
+
+    - name: security-viewer
+      description: "Read-only access to all environments for security auditing"
+      policies:
+        - "p, proj:devsecops-platform:security-viewer, applications, get, devsecops-platform/*, allow"
+      groups:
+        - security-team
