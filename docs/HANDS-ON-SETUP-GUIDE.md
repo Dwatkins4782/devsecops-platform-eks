@@ -621,6 +621,11 @@ This script checks:
 
 ## Phase 6: Verify Monitoring Stack
 
+> **Want a visual experience?** After verifying the monitoring stack here, see the
+> [Lens Monitoring Guide](LENS-MONITORING-GUIDE.md) for how to use the Lens Kubernetes IDE
+> to visually manage your clusters, set up real-time metrics dashboards, and query
+> Prometheus with PromQL.
+
 ### Step 6.1: Access Prometheus
 
 ```bash

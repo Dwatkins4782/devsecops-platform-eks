@@ -236,6 +236,7 @@ diff <(kubectl kustomize kubernetes/overlays/dev/) \
 ## Documentation
 
 - [Hands-On Setup Guide](docs/HANDS-ON-SETUP-GUIDE.md) — Step-by-step lab to deploy the platform on your own AWS account
+- [Lens & Monitoring Guide](docs/LENS-MONITORING-GUIDE.md) — Lens IDE setup, Prometheus metrics, Grafana dashboards, and monitoring deep-dive
 - [Multi-Environment Guide](docs/MULTI-ENV-GUIDE.md) — Complete beginner walkthrough of how everything connects
 - [Interview Prep](docs/INTERVIEW-PREP-SR-DEVOPS-ENGINEER.md) — DevOps interview preparation
 
