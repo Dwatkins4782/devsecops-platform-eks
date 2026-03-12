@@ -235,7 +235,8 @@ diff <(kubectl kustomize kubernetes/overlays/dev/) \
 
 ## Documentation
 
-- [Multi-Environment Guide](docs/MULTI-ENV-GUIDE.md) — Complete beginner walkthrough
+- [Hands-On Setup Guide](docs/HANDS-ON-SETUP-GUIDE.md) — Step-by-step lab to deploy the platform on your own AWS account
+- [Multi-Environment Guide](docs/MULTI-ENV-GUIDE.md) — Complete beginner walkthrough of how everything connects
 - [Interview Prep](docs/INTERVIEW-PREP-SR-DEVOPS-ENGINEER.md) — DevOps interview preparation
 
 ---

@@ -1,6 +1,8 @@
 # Multi-Environment Guide: From Zero to Production
 
 > **Who is this for?** If you're new to multi-environment infrastructure and need to understand how dev/staging/prod environments work together, this guide explains everything from the ground up. No prior knowledge of Terragrunt, Kustomize, or ArgoCD is assumed.
+>
+> **Want to deploy it yourself?** See the [Hands-On Setup Guide](HANDS-ON-SETUP-GUIDE.md) for a step-by-step lab walkthrough to deploy the entire platform on your own AWS account.
 
 ---
 
